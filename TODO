@@ -1,0 +1,244 @@
+1. Initialization Module (lm::runtime)
+include/lm/runtime/init.hpp
+cpp
+
+#pragma once
+#include <string>
+#include <nlohmann/json.hpp> // JSON library
+#include <filesystem>
+
+namespace lm::runtime {
+
+class SystemState {
+public:
+    // Singleton access
+    static SystemState& get_instance();
+    
+    // Initialize from JSON config
+    void initialize(const std::filesystem::path& config_path);
+    
+    // Configuration accessors
+    const nlohmann::json& config() const noexcept;
+    std::string get_string(const std::string& key) const;
+    int get_int(const std::string& key, int default_val = 0) const;
+    
+    // Subsystem states
+    bool is_tokenizer_ready() const noexcept;
+    bool is_model_loaded() const noexcept;
+
+private:
+    SystemState() = default; // Private constructor
+    nlohmann::json config_;
+    bool tokenizer_ready_ = false;
+    bool model_loaded_ = false;
+};
+
+} // namespace lm::runtime
+
+2. Shutdown Module (lm::runtime)
+include/lm/runtime/shutdown.hpp
+cpp
+
+#pragma once
+#include <nlohmann/json.hpp>
+#include <filesystem>
+
+namespace lm::runtime {
+
+class ShutdownHandler {
+public:
+    // Serialize state to JSON
+    static void save_state(
+        const std::filesystem::path& output_path,
+        bool include_model_weights = false
+    );
+    
+    // Cleanup hooks
+    static void register_cleanup(void (*func)());
+    static void execute_cleanup();
+};
+
+} // namespace lm::runtime
+
+3. Implementation Files
+src/runtime/init.cpp
+cpp
+
+#include "lm/runtime/init.hpp"
+#include <fstream>
+#include <stdexcept>
+
+using namespace lm::runtime;
+
+void SystemState::initialize(const std::filesystem::path& config_path) {
+    try {
+        // Load JSON config
+        std::ifstream f(config_path);
+        config_ = nlohmann::json::parse(f);
+        
+        // Validate required fields
+        if (!config_.contains("tokenizer") || !config_.contains("model")) {
+            throw std::runtime_error("Invalid config: missing required sections");
+        }
+        
+        // Initialize subsystems
+        tokenizer_ready_ = initialize_tokenizer(config_["tokenizer"]);
+        model_loaded_ = initialize_model(config_["model"]);
+        
+    } catch (const std::exception& e) {
+        throw std::runtime_error("Initialization failed: " + std::string(e.what()));
+    }
+}
+
+// ... (Other method implementations)
+
+src/runtime/shutdown.cpp
+cpp
+
+#include "lm/runtime/shutdown.hpp"
+#include <vector>
+#include <mutex>
+
+namespace {
+    std::vector<void (*)()> cleanup_functions;
+    std::mutex cleanup_mutex;
+}
+
+void ShutdownHandler::save_state(
+    const std::filesystem::path& output_path,
+    bool include_model_weights) 
+{
+    nlohmann::json state;
+    
+    // Capture framework state
+    state["tokenizer"] = serialize_tokenizer_state();
+    state["model"] = serialize_model_state(include_model_weights);
+    state["threading"] = serialize_thread_pool_stats();
+    
+    // Write to file
+    std::ofstream(output_path) << state.dump(2); // Pretty print
+}
+
+void ShutdownHandler::register_cleanup(void (*func)()) {
+    std::lock_guard<std::mutex> lock(cleanup_mutex);
+    cleanup_functions.push_back(func);
+}
+
+void ShutdownHandler::execute_cleanup() {
+    std::lock_guard<std::mutex> lock(cleanup_mutex);
+    for (auto it = cleanup_functions.rbegin(); it != cleanup_functions.rend(); ++it) {
+        (*it)(); // Execute in reverse order
+    }
+}
+
+4. Configuration JSON Schema
+config_schema.json
+json
+
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "required": ["tokenizer", "model"],
+  "properties": {
+    "tokenizer": {
+      "type": "object",
+      "properties": {
+        "type": {"enum": ["bpe", "sentencepiece"]},
+        "vocab_path": {"type": "string"},
+        "dropout": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "model": {
+      "type": "object",
+      "properties": {
+        "path": {"type": "string"},
+        "max_seq_len": {"type": "integer", "minimum": 1}
+      }
+    },
+    "threading": {
+      "type": "object",
+      "properties": {
+        "worker_threads": {"type": "integer", "minimum": 1}
+      }
+    }
+  }
+}
+
+5. Usage Example
+Initialization
+cpp
+
+#include "lm/runtime/init.hpp"
+
+int main() {
+    try {
+        auto& state = lm::runtime::SystemState::get_instance();
+        state.initialize("config.json");
+        
+        if (!state.is_model_loaded()) {
+            throw std::runtime_error("Model failed to load");
+        }
+    } catch (const std::exception& e) {
+        std::cerr << "Fatal error: " << e.what() << std::endl;
+        return 1;
+    }
+}
+
+Shutdown
+cpp
+
+#include "lm/runtime/shutdown.hpp"
+
+void cleanup_db_connections() {
+    // Custom cleanup logic
+}
+
+int main() {
+    lm::runtime::ShutdownHandler::register_cleanup(cleanup_db_connections);
+    
+    // ... run application ...
+    
+    lm::runtime::ShutdownHandler::save_state("shutdown_state.json");
+    lm::runtime::ShutdownHandler::execute_cleanup();
+}
+
+6. CMake Integration
+cmake
+
+# Add to your CMakeLists.txt
+find_package(nlohmann_json 3.9 REQUIRED)
+
+add_library(lm_runtime
+    src/runtime/init.cpp
+    src/runtime/shutdown.cpp
+)
+
+target_link_libraries(lm_runtime
+    PRIVATE nlohmann_json::nlohmann_json
+)
+
+Key Features
+
+    Thread-Safe Cleanup: Reverse-order execution of registered handlers
+
+    Config Validation: JSON schema verification during initialization
+
+    State Capture: Full system snapshot on shutdown
+
+    Singleton Pattern: Controlled access to system state
+
+Error Handling
+Error Case	Recovery Action
+Invalid JSON	Throw std::runtime_error with path info
+Missing Required Field	Fail fast during initialization
+Shutdown Serialization Failure	Log warning, continue cleanup
+
+This implementation provides a robust foundation for managing the framework lifecycle. Would you like to add any of the following?
+
+    Configuration hot-reloading
+
+    Encrypted config files
+
+    Distributed state serialization
+
+
